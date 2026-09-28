@@ -12,6 +12,11 @@ from app.core.config import get_settings
 from app.core.exceptions import AIServiceException
 from app.core.logging import get_logger
 
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None  # type: ignore
+
 logger = get_logger(__name__)
 settings = get_settings()
 
@@ -110,12 +115,11 @@ Return ONLY the JSON object. No explanation, no markdown.
         category_hint: str | None = None,
         image_url: str | None = None,
     ) -> dict[str, Any]:
-        if not settings.gemini_api_key:
+        if not settings.gemini_api_key or genai is None:
             logger.warning("ai.classify.no_api_key — using deterministic fallback")
             return _deterministic_classify(text)
 
         try:
-            import google.generativeai as genai
             genai.configure(api_key=settings.gemini_api_key)
             model = genai.GenerativeModel(settings.gemini_model)
 
@@ -161,10 +165,9 @@ Return ONLY the JSON object. No explanation, no markdown.
 
     async def get_embedding(self, text: str) -> list[float] | None:
         """Generate text embedding for duplicate detection / RAG."""
-        if not settings.gemini_api_key:
+        if not settings.gemini_api_key or genai is None:
             return None
         try:
-            import google.generativeai as genai
             genai.configure(api_key=settings.gemini_api_key)
             result = genai.embed_content(
                 model=f"models/{settings.gemini_embedding_model}",
@@ -175,3 +178,7 @@ Return ONLY the JSON object. No explanation, no markdown.
         except Exception as exc:
             logger.warning("ai.embedding.failed", error=str(exc))
             return None
+
+
+# Backward-compatibility alias
+AIService = AIClassificationService

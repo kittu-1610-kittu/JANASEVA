@@ -49,14 +49,8 @@ def evaluate_rules(
     Score = matched_rules / total_rules.
     """
     criteria: list[MatchedCriterion] = []
-    matched = 0
-    total = 0
 
     def check(key: str, citizen_val: Any, required_val: Any, match: bool) -> None:
-        nonlocal matched, total
-        total += 1
-        if match:
-            matched += 1
         criteria.append(MatchedCriterion(
             rule_key=key,
             citizen_value=str(citizen_val) if citizen_val is not None else "not provided",
@@ -102,5 +96,7 @@ def evaluate_rules(
         matched_edu = c_edu in allowed_upper if profile.education_level else False
         check("education_level", profile.education_level, str(allowed), matched_edu)
 
-    score = matched / total if total > 0 else 0.0
+    total = len(criteria)
+    matched = sum(1 for c in criteria if c.matched)
+    score = (matched / total) if total > 0 else 0.0
     return criteria, score
