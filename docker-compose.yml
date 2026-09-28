@@ -1,0 +1,287 @@
+version: "3.9"
+
+# =============================================================================
+# JANASEVA OS — Local Development Stack
+# =============================================================================
+# Usage:
+#   docker compose up -d        # start all services
+#   docker compose logs -f api  # tail api logs
+#   docker compose down -v      # stop and remove volumes (data loss!)
+# =============================================================================
+
+x-api-env: &api-env
+  DATABASE_URL: ${DATABASE_URL}
+  DATABASE_SYNC_URL: ${DATABASE_SYNC_URL}
+  REDIS_URL: ${REDIS_URL}
+  CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+  CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+  APP_SECRET_KEY: ${APP_SECRET_KEY}
+  APP_ENV: ${APP_ENV:-development}
+  APP_DEBUG: ${APP_DEBUG:-true}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+  JWT_REFRESH_TOKEN_EXPIRE_DAYS: ${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}
+  MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+  MINIO_BUCKET_EVIDENCE: ${MINIO_BUCKET_EVIDENCE:-janaseva-evidence}
+  MINIO_BUCKET_DOCUMENTS: ${MINIO_BUCKET_DOCUMENTS:-janaseva-documents}
+  MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+  GEMINI_API_KEY: ${GEMINI_API_KEY}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+  GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-text-embedding-004}
+  SMTP_HOST: ${SMTP_HOST}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER}
+  SMTP_PASSWORD: ${SMTP_PASSWORD}
+  SMTP_FROM: ${SMTP_FROM}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+  DEMO_DISTRICT_NAME: ${DEMO_DISTRICT_NAME:-Krishnapur District}
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 + PostGIS 3.4
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: janaseva_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-janaseva}
+      POSTGRES_USER: ${POSTGRES_USER:-janaseva}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/00_init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-janaseva} -d ${POSTGRES_DB:-janaseva}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: janaseva_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # MinIO (S3-compatible object storage)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: janaseva_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 10s
+    networks:
+      - janaseva_net
+
+  # MinIO bucket initializer (runs once)
+  minio-init:
+    image: minio/mc:latest
+    container_name: janaseva_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY} &&
+      mc mb --ignore-existing local/${MINIO_BUCKET_EVIDENCE:-janaseva-evidence} &&
+      mc mb --ignore-existing local/${MINIO_BUCKET_DOCUMENTS:-janaseva-documents} &&
+      mc anonymous set download local/${MINIO_BUCKET_DOCUMENTS:-janaseva-documents} &&
+      echo 'MinIO buckets initialized.'
+      "
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # FastAPI Backend
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+      target: development
+    container_name: janaseva_api
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+    volumes:
+      - ./apps/api:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker (background tasks: SLA, escalation, notifications, AI jobs)
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+      target: development
+    container_name: janaseva_worker
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+    volumes:
+      - ./apps/api:/app
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4 -Q default,sla,notifications,ai
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # Celery Beat (scheduler: SLA cron, escalation cron, etc.)
+  # ---------------------------------------------------------------------------
+  beat:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+      target: development
+    container_name: janaseva_beat
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+    volumes:
+      - ./apps/api:/app
+    command: celery -A app.workers.celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # Next.js Frontend
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      target: development
+    container_name: janaseva_web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8000/ws}
+      NEXT_PUBLIC_MAPTILER_KEY: ${NEXT_PUBLIC_MAPTILER_KEY}
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-JANASEVA OS}
+      NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-true}
+    volumes:
+      - ./apps/web:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # PgAdmin (optional dev tool)
+  # ---------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: janaseva_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@janaseva.demo}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    profiles:
+      - tools
+    networks:
+      - janaseva_net
+
+  # ---------------------------------------------------------------------------
+  # Flower (Celery monitoring, optional)
+  # ---------------------------------------------------------------------------
+  flower:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+      target: development
+    container_name: janaseva_flower
+    restart: unless-stopped
+    environment:
+      <<: *api-env
+    command: celery -A app.workers.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    profiles:
+      - tools
+    networks:
+      - janaseva_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  pgadmin_data:
+
+networks:
+  janaseva_net:
+    driver: bridge

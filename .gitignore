@@ -1,0 +1,48 @@
+# === Node / Next.js ===
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.log
+htmlcov/
+.coverage
+
+# === Environment ===
+.env
+.env.local
+.env.*.local
+
+# === Editor ===
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# === Docker volumes ===
+docker/postgres-data/
+docker/redis-data/
+docker/minio-data/
+
+# === Build artefacts ===
+*.pyc
+*.pyo
+build/
+*.egg
+
+# === Uploads (local dev) ===
+uploads/
+media/
