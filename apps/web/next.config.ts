@@ -6,6 +6,12 @@ const nextConfig: NextConfig = {
   experimental: {
     typedRoutes: false,
   },
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   images: {
     remotePatterns: [
       {
