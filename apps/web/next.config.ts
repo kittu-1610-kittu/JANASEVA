@@ -3,9 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
-  experimental: {
-    typedRoutes: false,
-  },
+  typedRoutes: false,
   eslint: {
     ignoreDuringBuilds: true,
   },
