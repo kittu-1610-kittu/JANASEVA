@@ -14,3 +14,7 @@ services:
         value: "true"
       - key: SECRET_KEY
         generateValue: true
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true

@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyHttpUrl, AnyUrl, EmailStr, field_validator
+from pydantic import AliasChoices, AnyHttpUrl, AnyUrl, EmailStr, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,11 +24,14 @@ class Settings(BaseSettings):
     app_name: str = "JANASEVA OS"
     app_env: Literal["development", "staging", "production"] = "development"
     app_debug: bool = False
-    app_secret_key: str
+    app_secret_key: str = Field(
+        default="janaseva-production-app-secret-key-32chars!",
+        validation_alias=AliasChoices("app_secret_key", "secret_key"),
+    )
 
     # Database
-    database_url: str
-    database_sync_url: str
+    database_url: str = "postgresql+asyncpg://janaseva:janaseva@localhost:5432/janaseva"
+    database_sync_url: str = ""
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_echo: bool = False
@@ -39,7 +42,10 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://redis:6379/2"
 
     # JWT
-    jwt_secret_key: str
+    jwt_secret_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("jwt_secret_key", "app_secret_key", "secret_key"),
+    )
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 7
@@ -47,7 +53,7 @@ class Settings(BaseSettings):
     # Object storage
     minio_endpoint: str = "minio:9000"
     minio_access_key: str = "minioadmin"
-    minio_secret_key: str
+    minio_secret_key: str = "minioadmin"
     minio_bucket_evidence: str = "janaseva-evidence"
     minio_bucket_documents: str = "janaseva-documents"
     minio_use_ssl: bool = False
@@ -97,6 +103,36 @@ class Settings(BaseSettings):
     def parse_cors(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             return [o.strip() for o in v.split(",") if o.strip()]
+        return v
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v: str | None) -> str:
+        if not v:
+            return "postgresql+asyncpg://janaseva:janaseva@localhost:5432/janaseva"
+        # Render / Heroku / Neon compatibility: convert postgres:// and postgresql:// to postgresql+asyncpg://
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        if v.startswith("postgresql://") and not v.startswith("postgresql+"):
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
+
+    @field_validator("database_sync_url", mode="before")
+    @classmethod
+    def normalize_sync_database_url(cls, v: str | None) -> str:
+        if not v:
+            return ""
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+psycopg2://", 1)
+        if v.startswith("postgresql://") and not v.startswith("postgresql+"):
+            return v.replace("postgresql://", "postgresql+psycopg2://", 1)
+        return v
+
+    @field_validator("jwt_secret_key", mode="after")
+    @classmethod
+    def ensure_jwt_secret_key(cls, v: str, info) -> str:
+        if not v:
+            return info.data.get("app_secret_key") or "janaseva-production-app-secret-key-32chars!"
         return v
 
     @property
